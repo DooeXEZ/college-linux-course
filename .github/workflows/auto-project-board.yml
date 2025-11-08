@@ -7,13 +7,23 @@ on:
     types: [submitted]
 
 env:
-  PROJECT_NUMBER: 4  # Замени на номер твоего проекта (смотри в URL)
-  ORGANIZATION: virusneo1997-del  # Твой username
+  PROJECT_NUMBER: 4
+  ORGANIZATION: virusneo1997-del
+
+permissions:
+  contents: read
+  pull-requests: write
+  repository-projects: write
 
 jobs:
   automate-project:
     runs-on: ubuntu-latest
     steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: 🎯 Автоматическое обновление карточек
         uses: actions/github-script@v6
         with:

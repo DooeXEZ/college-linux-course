@@ -1,0 +1,69 @@
+name: 🔍 Диагностика Project Board
+
+on:
+  workflow_dispatch:  # Запускается вручную
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🩺 Проверка настроек
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            console.log('=== 🩺 ДИАГНОСТИКА ===');
+            
+            // 1. Проверяем проекты
+            const projectsQuery = `query {
+              user(login: "virusneo1997-del") {
+                projectsV2(first: 5) {
+                  nodes {
+                    title
+                    number
+                    fields(first: 10) {
+                      nodes {
+                        ... on ProjectV2Field {
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          name
+                          options {
+                            name
+                          }
+                        }
+                      }
+                    }
+                    items(first: 20) {
+                      nodes {
+                        fieldValues(first: 5) {
+                          nodes {
+                            ... on ProjectV2ItemFieldTextValue {
+                              field { ... on ProjectV2FieldCommon { name } }
+                              text
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }`;
+            
+            const result = await github.graphql(projectsQuery);
+            const project = result.user.projectsV2.nodes[0];
+            
+            console.log('📊 ПРОЕКТ:', project.title);
+            console.log('📋 ПОЛЯ:', project.fields.nodes.map(f => f.name));
+            console.log('👥 СТУДЕНТЫ В ПРОЕКТЕ:');
+            project.items.nodes.forEach(item => {
+              const githubField = item.fieldValues.nodes.find(f => 
+                f.field && f.field.name === 'Student GitHub'
+              );
+              if (githubField) {
+                console.log(`- ${githubField.text}`);
+              }
+            });
+            
+            console.log('=== 🏁 ДИАГНОСТИКА ЗАВЕРШЕНА ===');

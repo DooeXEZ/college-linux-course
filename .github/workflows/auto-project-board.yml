@@ -7,8 +7,8 @@ on:
     types: [submitted]
 
 env:
-  PROJECT_NUMBER: 4  # Замените на ваш номер проекта из URL
-  USER_LOGIN: virusneo1997-del  # Ваш GitHub логин
+  PROJECT_NUMBER: 4
+  USER_LOGIN: virusneo1997-del
 
 jobs:
   automate-project:
@@ -17,11 +17,48 @@ jobs:
       - name: 🎯 Автоматическое обновление карточек
         uses: actions/github-script@v6
         with:
-          # КРИТИЧЕСКИ ВАЖНО: Использование PAT для доступа к Projects
           github-token: ${{ secrets.PROJECT_ACCESS_TOKEN }}
           script: |
             console.log('=== 🚀 ЗАПУСК АВТОМАТИЗАЦИИ ===');
             
+            // 1. ОТЛАДКА ДОСТУПНЫХ ПРОЕКТОВ
+            try {
+              console.log('🔍 Проверяем доступные проекты...');
+              const debugQuery = `query {
+                user(login: "${process.env.USER_LOGIN}") {
+                  projectsV2(first: 20) {
+                    nodes {
+                      number
+                      title
+                      id
+                    }
+                  }
+                }
+              }`;
+              
+              const debugResult = await github.graphql(debugQuery);
+              const projects = debugResult.user.projectsV2.nodes;
+              console.log('📋 Доступные проекты:', projects);
+              
+              const targetProject = projects.find(p => p.number === parseInt(process.env.PROJECT_NUMBER));
+              if (!targetProject) {
+                console.log(`❌ Проект с номером ${process.env.PROJECT_NUMBER} не найден!`);
+                console.log('💡 Используйте один из этих номеров:');
+                projects.forEach(project => {
+                  console.log(`- Номер: ${project.number}, Название: "${project.title}"`);
+                });
+                return;
+              }
+              
+              console.log(`✅ Целевой проект найден: "${targetProject.title}" (номер: ${targetProject.number})`);
+              
+            } catch (error) {
+              console.error('💥 Ошибка при поиске проектов:', error.message);
+              console.log('🔧 Проверьте: USER_LOGIN и права доступа PAT');
+              return;
+            }
+            
+            // 2. ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ PR
             const { pull_request } = context.payload;
             if (!pull_request) {
               console.log('❌ Нет информации о PR');
@@ -96,49 +133,47 @@ jobs:
             console.log(`🎯 Устанавливаем новый статус: ${newStatus}`);
             
             try {
-              // 1. ПОЛУЧАЕМ ID ПРОЕКТА ЧЕРЕЗ GRAPHQL
-              const projectQuery = `
-                query getProject($user: String!, $number: Int!) {
-                  user(login: $user) {
-                    projectV2(number: $number) {
-                      id
-                      title
-                      fields(first: 20) {
-                        nodes {
-                          ... on ProjectV2Field {
+              // 3. ПОЛУЧАЕМ ID ПРОЕКТА И ИНФОРМАЦИЮ О ПОЛЯХ
+              const projectQuery = `query getProject($user: String!, $number: Int!) {
+                user(login: $user) {
+                  projectV2(number: $number) {
+                    id
+                    title
+                    fields(first: 20) {
+                      nodes {
+                        ... on ProjectV2Field {
+                          id
+                          name
+                        }
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                          options {
                             id
                             name
-                          }
-                          ... on ProjectV2SingleSelectField {
-                            id
-                            name
-                            options {
-                              id
-                              name
-                            }
                           }
                         }
                       }
                     }
                   }
                 }
-              `;
+              }`;
               
               const projectResult = await github.graphql(projectQuery, {
                 user: process.env.USER_LOGIN,
-                number: process.env.PROJECT_NUMBER
+                number: parseInt(process.env.PROJECT_NUMBER)
               });
               
               const project = projectResult.user.projectV2;
               if (!project) {
-                console.log('❌ Проект не найден. Проверь PROJECT_NUMBER и USER_LOGIN');
+                console.log('❌ Проект не найден после проверки');
                 return;
               }
               
               const projectId = project.id;
-              console.log(`📊 Найден проект: ${project.title} (ID: ${projectId})`);
+              console.log(`📊 Работаем с проектом: ${project.title} (ID: ${projectId})`);
               
-              // 2. НАХОДИМ ПОЛЕ STATUS
+              // 4. НАХОДИМ ПОЛЕ STATUS
               const statusField = project.fields.nodes.find(field => field.name === 'Status');
               if (!statusField) {
                 console.log('❌ Поле Status не найдено в проекте');
@@ -148,7 +183,12 @@ jobs:
               
               console.log(`📋 Найдено поле Status: ${statusField.id}`);
               
-              // 3. НАХОДИМ ОПЦИЮ СТАТУСА
+              // 5. НАХОДИМ ОПЦИЮ СТАТУСА
+              if (!statusField.options) {
+                console.log('❌ У поля Status нет опций');
+                return;
+              }
+              
               const statusOption = statusField.options.find(option => option.name === newStatus);
               if (!statusOption) {
                 console.log(`❌ Опция статуса '${newStatus}' не найдена`);
@@ -158,24 +198,22 @@ jobs:
               
               console.log(`📋 Найдена опция статуса: ${statusOption.name} (ID: ${statusOption.id})`);
               
-              // 4. ИЩЕМ КАРТОЧКУ СТУДЕНТА
-              const itemsQuery = `
-                query getProjectItems($projectId: ID!) {
-                  node(id: $projectId) {
-                    ... on ProjectV2 {
-                      items(first: 50) {
-                        nodes {
-                          id
-                          fieldValues(first: 10) {
-                            nodes {
-                              ... on ProjectV2ItemFieldTextValue {
-                                field {
-                                  ... on ProjectV2FieldCommon {
-                                    name
-                                  }
+              // 6. ИЩЕМ КАРТОЧКУ СТУДЕНТА
+              const itemsQuery = `query getProjectItems($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    items(first: 50) {
+                      nodes {
+                        id
+                        fieldValues(first: 10) {
+                          nodes {
+                            ... on ProjectV2ItemFieldTextValue {
+                              field {
+                                ... on ProjectV2FieldCommon {
+                                  name
                                 }
-                                text
                               }
+                              text
                             }
                           }
                         }
@@ -183,12 +221,13 @@ jobs:
                     }
                   }
                 }
-              `;
+              }`;
               
               const itemsResult = await github.graphql(itemsQuery, { projectId });
               const items = itemsResult.node.items.nodes;
               
               console.log(`🔍 Ищем карточку для студента: ${author}`);
+              console.log(`📊 Всего карточек в проекте: ${items.length}`);
               
               // Ищем карточку по Student GitHub
               const studentItem = items.find(item => {
@@ -214,16 +253,14 @@ jobs:
               
               console.log(`📎 Найдена карточка студента: ${studentItem.id}`);
               
-              // 5. ОБНОВЛЯЕМ СТАТУС КАРТОЧКИ
-              const updateMutation = `
-                mutation updateProjectItem($input: UpdateProjectV2ItemFieldValueInput!) {
-                  updateProjectV2ItemFieldValue(input: $input) {
-                    projectV2Item {
-                      id
-                    }
+              // 7. ОБНОВЛЯЕМ СТАТУС КАРТОЧКИ
+              const updateMutation = `mutation updateProjectItem($input: UpdateProjectV2ItemFieldValueInput!) {
+                updateProjectV2ItemFieldValue(input: $input) {
+                  projectV2Item {
+                    id
                   }
                 }
-              `;
+              }`;
               
               const updateInput = {
                 projectId,
@@ -237,9 +274,14 @@ jobs:
               console.log('🔄 Отправляем запрос на обновление...');
               await github.graphql(updateMutation, { input: updateInput });
               
-              console.log(`✅ УСПЕХ: Карточка студента ${author} перемещена в: ${newStatus}`);
+              console.log(`✅ УСПЕХ: Карточка студента ${author} перемещена в статус: ${newStatus}`);
               
             } catch (error) {
               console.error('💥 ОШИБКА при обновлении карточки:', error);
-              console.log('🔧 Проверь: PROJECT_NUMBER, USER_LOGIN и права доступа PAT');
+              console.log('🔧 Детали ошибки:', error.message);
+              if (error.errors) {
+                console.log('📋 GraphQL ошибки:', error.errors);
+              }
             }
+            
+            console.log('=== 🏁 ЗАВЕРШЕНИЕ АВТОМАТИЗАЦИИ ===');

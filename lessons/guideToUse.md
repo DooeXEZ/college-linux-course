@@ -12,7 +12,7 @@
 
 ✅ Make profile private and hide activity
 
-## Что это делает:
+### Что это делает:
 
 Скрывает ваш граф контрибуций
 
@@ -26,7 +26,7 @@
 
 ✅ Include private contributions on my profile
 
-## Что это дает:
+### Что это дает:
 
 В графе контрибуций показываются приватные коммиты
 

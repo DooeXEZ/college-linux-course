@@ -1,0 +1,167 @@
+name: Update Project v2 Status
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, review_requested, closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  update-project:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+
+      - name: Set variables
+        id: vars
+        run: |
+          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+          echo "PR_ID=${{ github.event.pull_request.node_id }}" >> $GITHUB_ENV
+          echo "REPO_OWNER=${{ github.repository_owner }}" >> $GITHUB_ENV
+          echo "REPO_NAME=${{ github.event.repository.name }}" >> $GITHUB_ENV
+
+      - name: Find Project ID
+        id: project
+        run: |
+          RESULT=$(gh api graphql -f query='
+            query {
+              user(login: "'${{ env.REPO_OWNER }}'") {
+                projectsV2(first: 20) {
+                  nodes {
+                    id
+                    title
+                  }
+                }
+              }
+            }')
+
+          PROJECT_ID=$(echo "$RESULT" | jq -r '.data.user.projectsV2.nodes[] | select(.title=="Автоматизация курсов") | .id')
+
+          if [ -z "$PROJECT_ID" ]; then
+            echo "Project not found!"
+            exit 1
+          fi
+
+          echo "PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+      - name: Add PR to Project v2 (if missing)
+        id: addpr
+        run: |
+          ITEM_ID=$(gh api graphql -f query='
+            query($project: ID!, $pr: ID!) {
+              node(id: $project) {
+                ... on ProjectV2 {
+                  items(first: 100) {
+                    nodes {
+                      content {
+                        ... on PullRequest { id }
+                      }
+                      id
+                    }
+                  }
+                }
+              }
+            }' -f project="$PROJECT_ID" -f pr="$PR_ID" | jq -r '.data.node.items.nodes[] | select(.content.id=="'$PR_ID'") | .id')
+
+          if [ -z "$ITEM_ID" ]; then
+            # Добавляем
+            NEW_ITEM=$(gh api graphql -f query='
+              mutation($project: ID!, $content: ID!) {
+                addProjectV2ItemById(input: {
+                  projectId: $project,
+                  contentId: $content
+                }) {
+                  item {
+                    id
+                  }
+                }
+              }' -f project="$PROJECT_ID" -f content="$PR_ID")
+
+            ITEM_ID=$(echo "$NEW_ITEM" | jq -r '.data.addProjectV2ItemById.item.id')
+          fi
+
+          echo "ITEM_ID=$ITEM_ID" >> $GITHUB_ENV
+
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+      - name: Get column IDs
+        id: fields
+        run: |
+          DATA=$(gh api graphql -f query='
+            query($project: ID!) {
+              node(id: $project) {
+                ... on ProjectV2 {
+                  fields(first: 20) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ' -f project="$PROJECT_ID")
+
+          STATUS_FIELD_ID=$(echo "$DATA" | jq -r '.data.node.fields.nodes[] | select(.name=="Status") | .id')
+          TO_DO=$(echo "$DATA" | jq -r '.data.node.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="To do") | .id')
+          IN_PROGRESS=$(echo "$DATA" | jq -r '.data.node.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="In Progress") | .id')
+          IN_REVIEW=$(echo "$DATA" | jq -r '.data.node.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="In review") | .id')
+          DONE=$(echo "$DATA" | jq -r '.data.node.fields.nodes[] | select(.name=="Status") | .options[] | select(.name=="Done") | .id')
+
+          echo "STATUS_FIELD_ID=$STATUS_FIELD_ID" >> $GITHUB_ENV
+          echo "TO_DO=$TO_DO" >> $GITHUB_ENV
+          echo "IN_PROGRESS=$IN_PROGRESS" >> $GITHUB_ENV
+          echo "IN_REVIEW=$IN_REVIEW" >> $GITHUB_ENV
+          echo "DONE=$DONE" >> $GITHUB_ENV
+
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+
+      - name: Determine new status
+        id: status
+        run: |
+          if [ "${{ github.event.action }}" == "opened" ]; then
+            echo "STATUS=$IN_PROGRESS" >> $GITHUB_ENV
+          elif [ "${{ github.event.action }}" == "review_requested" ]; then
+            echo "STATUS=$IN_REVIEW" >> $GITHUB_ENV
+          elif [ "${{ github.event.pull_request.merged }}" == "true" ]; then
+            echo "STATUS=$DONE" >> $GITHUB_ENV
+          elif [ "${{ github.event.action }}" == "closed" ]; then
+            echo "STATUS=$TO_DO" >> $GITHUB_ENV
+          else
+            echo "STATUS=$IN_PROGRESS" >> $GITHUB_ENV
+          fi
+
+      - name: Update status in Project v2
+        run: |
+          gh api graphql -f query='
+          mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+            updateProjectV2ItemFieldValue(input: {
+              projectId: $project,
+              itemId: $item,
+              fieldId: $field,
+              value: {
+                singleSelectOptionId: $value
+              }
+            }) {
+              projectV2Item { id }
+            }
+          }' \
+          -f project="$PROJECT_ID" \
+          -f item="$ITEM_ID" \
+          -f field="$STATUS_FIELD_ID" \
+          -f value="$STATUS"
+
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}

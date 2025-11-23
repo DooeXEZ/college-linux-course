@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   issues: write
 
 jobs:
@@ -14,34 +14,80 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout student's repo
+      - name: Extract PR info
+        id: pr
+        run: |
+          echo "BRANCH=${{ github.event.pull_request.head.ref }}" >> $GITHUB_ENV
+
+      - name: Checkout student's repository
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          ref: ${{ env.BRANCH }}
 
-      - name: Install GitHub CLI
-        run: sudo apt-get install gh -y
-
-      - name: Authenticate GitHub CLI
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
-
-      - name: Проверяем структуру задачи студента
+      - name: Determine lesson folder
+        id: lesson
         run: |
-          # Пример проверки: ожидаем, что папка урока есть
-          LESSON="lesson-${{ github.event.pull_request.head.ref }}"
-          if [ ! -d "$LESSON" ]; then
-            echo "Error: не найдена папка урока $LESSON"
+          # ищем любую папку lesson-xx
+          folder=$(find . -maxdepth 1 -type d -name "lesson-*")
+          if [ -z "$folder" ]; then
+            echo "❌ Не найдена папка урока (например: lesson-02)."
             exit 1
           fi
+          echo "LESSON=$folder" >> $GITHUB_ENV
+          echo "Найдена папка урока: $folder"
 
-      - name: Проверяем содержимое student-report.md
+      - name: Validate student structure
         run: |
-          REPORT_PATH="${{ github.event.pull_request.head.ref }}/student-report.md"
-          if [ ! -f "$REPORT_PATH" ]; then
-            echo "Error: student-report.md не найден в папке урока"
+          REPORT="${{ env.LESSON }}/student-report.md"
+          if [ ! -f "$REPORT" ]; then
+            echo "❌ Файл student-report.md отсутствует."
             exit 1
           fi
+          echo "student-report.md найден"
 
-      - name: Успешная валидация
-        run: echo "Structure check OK"
+      - name: Checkout teacher's course repository
+        uses: actions/checkout@v3
+        with:
+          repository: virusneo1997-del/college-linux-course
+          path: course
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r course/requirements.txt
+
+      - name: Run automated tests for this lesson
+        run: |
+          echo "Запускаем тесты для ${{ env.LESSON }}"
+          python course/scripts/run_lesson_tests.py HEAD~1 HEAD
+        continue-on-error: true
+        id: tests
+
+      - name: Add PR comment with test summary
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          message: |
+            ## 🧪 Автоматическая проверка задания
+
+            **Урок:** `${{ env.LESSON }}`  
+            **Статус:** ${{ steps.tests.outcome }}
+
+            Логи тестов:
+            ```
+            ${{ steps.tests.outputs.test-results }}
+            ```
+
+      - name: Fail job if tests failed
+        if: steps.tests.outcome != 'success'
+        run: |
+          echo "❌ Тесты не пройдены"
+          exit 1
+
+      - name: Success
+        run: echo "🎉 Все проверки пройдены!"

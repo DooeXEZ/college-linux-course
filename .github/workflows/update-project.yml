@@ -1,8 +1,8 @@
-name: update-project
+name: Update Project
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, closed]
+    types: [opened, reopened, synchronize, ready_for_review, closed]
 
 jobs:
   update-project:
@@ -12,122 +12,143 @@ jobs:
       - name: Checkout current repo
         uses: actions/checkout@v3
 
-      - name: Set variables
-        run: |
-          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
-          echo "REPO_OWNER=virusneo1997-del" >> $GITHUB_ENV
-          echo "REPO_NAME=college-linux-course" >> $GITHUB_ENV
-          echo "PROJECT_NAME=Автоматизация курсов" >> $GITHUB_ENV
-
       - name: Install GitHub CLI
-        run: sudo apt-get install -y gh
+        run: sudo apt-get install gh -y
 
       - name: Auth GitHub CLI
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
-        run: gh auth setup-git
+        run: gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Set variables
+        id: vars
+        run: |
+          echo "REPO=${GITHUB_REPOSITORY}" >> $GITHUB_ENV
+          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
 
       - name: Find Project ID
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+        id: find_project
         run: |
           PROJECT_ID=$(gh api graphql -f query='
             query {
-              viewer {
-                projectsV2(first: 20) {
+              repository(owner: "virusneo1997-del", name: "college-linux-course") {
+                projectsV2(first: 10) {
                   nodes {
                     id
                     title
                   }
                 }
               }
-            }' --jq ".data.viewer.projectsV2.nodes[] | select(.title==\"$PROJECT_NAME\") | .id")
+            }' --jq '.data.repository.projectsV2.nodes[] | select(.title == "Lessons") | .id')
+
+          if [ -z "$PROJECT_ID" ]; then
+            echo "Project not found!"
+            exit 1
+          fi
 
           echo "PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
 
-      - name: Add PR to Project v2 (if missing)
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+      - name: Add PR to Project (if missing)
         run: |
           ITEM_ID=$(gh api graphql -f query='
-            query($proj:ID!, $pr:Int!) {
-              node(id: $proj) {
+            query($project: ID!, $pr: Int!) {
+              repository(owner: "virusneo1997-del", name: "college-linux-course") {
+                pullRequest(number: $pr) {
+                  id
+                }
+              }
+              node(id: $project) {
                 ... on ProjectV2 {
-                  items(first:100) {
+                  items(first: 100) {
                     nodes {
                       content {
-                        ... on PullRequest { number }
+                        ... on PullRequest {
+                          number
+                        }
                       }
                       id
                     }
                   }
                 }
               }
-            }' -f proj=$PROJECT_ID -f pr=$PR_NUMBER --jq ".data.node.items.nodes[] | select(.content.number==$PR_NUMBER) | .id")
+            }' -F project=$PROJECT_ID -F pr=$PR_NUMBER --jq ".data.node.items.nodes[] | select(.content.number == $PR_NUMBER) | .id")
 
           if [ -z "$ITEM_ID" ]; then
+            echo "PR not in project — adding"
             ITEM_ID=$(gh api graphql -f query='
-              mutation($project:ID!, $pr:ID!) {
-                addProjectV2ItemById(input:{projectId:$project, contentId:$pr}) {
-                  item { id }
+              mutation($project: ID!, $pr: ID!) {
+                addProjectV2ItemById(input: {projectId: $project, contentId: $pr}) {
+                  item {
+                    id
+                  }
                 }
-              }' \
-              -f project=$PROJECT_ID \
-              -f pr="PR_${PR_NUMBER}" \
-              --jq ".data.addProjectV2ItemById.item.id")
+              }' -F project=$PROJECT_ID -F pr=$(gh api repos/virusneo1997-del/college-linux-course/pulls/$PR_NUMBER --jq '.node_id') --jq '.data.addProjectV2ItemById.item.id')
           fi
 
           echo "ITEM_ID=$ITEM_ID" >> $GITHUB_ENV
 
-      - name: Get column IDs
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+      - name: Get column fields
+        id: fields
         run: |
-          gh api graphql -f query='
-            query($id:ID!) {
-              node(id: $id) {
+          STATUS_FIELD=$(gh api graphql -f query='
+            query($project: ID!) {
+              node(id: $project) {
                 ... on ProjectV2 {
-                  fields(first:20) {
-                    nodes { id name }
+                  fields(first: 20) {
+                    nodes {
+                      id
+                      name
+                      dataType
+                    }
                   }
                 }
               }
-            }
-          ' -f id=$PROJECT_ID > fields.json
+            }' -F project=$PROJECT_ID --jq '.data.node.fields.nodes[] | select(.name=="Status") | .id')
 
-          STATUS_FIELD_ID=$(jq -r '.data.node.fields.nodes[] | select(.name=="Status") | .id' fields.json)
-
-          echo "STATUS_FIELD_ID=$STATUS_FIELD_ID" >> $GITHUB_ENV
+          echo "STATUS_FIELD=$STATUS_FIELD" >> $GITHUB_ENV
 
       - name: Determine new status
+        id: newstatus
         run: |
-          if [[ "${{ github.event.action }}" == "closed" && "${{ github.event.pull_request.merged }}" == "true" ]]; then
-            echo "TARGET_STATUS=Done" >> $GITHUB_ENV
-          elif [[ "${{ github.event.action }}" == "closed" ]]; then
-            echo "TARGET_STATUS=To do" >> $GITHUB_ENV
-          elif [[ ! -z "${{ github.event.pull_request.requested_reviewers }}" ]]; then
-            echo "TARGET_STATUS=In review" >> $GITHUB_ENV
+          if [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
+            NEW_STATUS="Done"
+          elif [[ "${{ github.event.pull_request.state }}" == "closed" ]]; then
+            NEW_STATUS="To do"
+          elif [[ -n "${{ github.event.pull_request.requested_reviewers[0].login }}" ]]; then
+            NEW_STATUS="In review"
           else
-            echo "TARGET_STATUS=In Progress" >> $GITHUB_ENV
+            NEW_STATUS="In progress"
           fi
 
-      - name: Update status in Project v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+          echo "NEW_STATUS=$NEW_STATUS" >> $GITHUB_ENV
+
+      - name: Apply new status
         run: |
           gh api graphql -f query='
-            mutation($project:ID!, $item:ID!, $field:ID!, $value:String!) {
-              updateProjectV2ItemFieldValue(input:{
-                projectId:$project,
-                itemId:$item,
-                fieldId:$field,
-                value:{ singleSelectOptionId:$value }
+            mutation($project: ID!, $field: ID!, $item: ID!, $value: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project,
+                itemId: $item,
+                fieldId: $field,
+                value: {singleSelectOptionId: $value}
               }) {
-                projectV2Item { id }
+                clientMutationId
               }
-            }
-          ' \
-          -f project=$PROJECT_ID \
-          -f item=$ITEM_ID \
-          -f field=$STATUS_FIELD_ID \
-          -f value="$TARGET_STATUS"
+            }' \
+            -F project=$PROJECT_ID \
+            -F field=$STATUS_FIELD \
+            -F item=$ITEM_ID \
+            -F value="$(gh api graphql -f query='query($project: ID!) {
+                node(id: $project) {
+                  ... on ProjectV2 {
+                    fields(first: 20) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField {
+                          options {
+                            id
+                            name
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -F project=$PROJECT_ID --jq ".data.node.fields.nodes[].options[] | select(.name==\"$NEW_STATUS\") | .id")"

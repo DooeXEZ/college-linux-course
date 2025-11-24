@@ -2,58 +2,106 @@ name: Update Project Status
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, closed]
+    types: [opened, reopened, ready_for_review, review_requested, closed]
 
 jobs:
   update-project:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Set PR Status in Project v2
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update Project Status
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PROJECT_ACCESS_TOKEN }}
+          github-token: ${{ secrets.CLI_token }}
           script: |
-            const projectId = "PVT_kwHODlAJvM4BHrKr";
-            const statusFieldId = "PVTSSF_lAHODlAJvM4BHrKrzg4W_H4";
-
-            const STATUS = {
-              TODO: "f75ad846",
-              IN_PROGRESS: "47fc9ee4",
-              IN_REVIEW: "a5af56b4",
-              DONE: "98236657"
-            };
-
             const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
 
-            let newStatus = null;
+            const PROJECT_NUMBER = 1; // Update if needed
+            const STATUS_FIELD_NAME = "Status";
 
-            if (pr.merged) {
-              newStatus = STATUS.DONE;
-            } else if (pr.state === "closed") {
-              newStatus = STATUS.TODO;
-            } else if (pr.requested_reviewers.length > 0) {
-              newStatus = STATUS.IN_REVIEW;
-            } else {
-              newStatus = STATUS.IN_PROGRESS;
+            async function getProjectId() {
+              const query = `query($org: String!, $number: Int!) {
+                organization(login: $org) {
+                  projectV2(number: $number) {
+                    id
+                  }
+                }
+              }`;
+              const res = await github.graphql(query, { org: owner, number: PROJECT_NUMBER });
+              return res.organization.projectV2.id;
             }
 
-            await github.graphql(`
-              mutation($projectId: ID!, $prId: ID!, $fieldId: ID!, $optionId: String!) {
+            async function getFieldId(projectId) {
+              const query = `query($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    fields(first: 20) {
+                      nodes {
+                        id
+                        name
+                      }
+                    }
+                  }
+                }
+              }`;
+              const res = await github.graphql(query, { projectId });
+              const field = res.node.fields.nodes.find(f => f.name === STATUS_FIELD_NAME);
+              return field?.id || null;
+            }
+
+            async function addOrUpdateItem(projectId, itemId) {
+              const mutation = `mutation($projectId: ID!, $itemId: ID!) {
+                addProjectV2ItemById(input: {projectId: $projectId, contentId: $itemId}) {
+                  item { id }
+                }
+              }`;
+              await github.graphql(mutation, { projectId, itemId });
+            }
+
+            function determineStatus(pr) {
+              if (pr.merged) return "Done";
+              if (pr.state === "closed") return "Todo";
+              if (pr.requested_reviewers?.length > 0) return "In review";
+              return "In progress";
+            }
+
+            async function run() {
+              const projectId = await getProjectId();
+              const fieldId = await getFieldId(projectId);
+              const status = determineStatus(pr);
+
+              console.log(`Status → ${status}`);
+
+              await addOrUpdateItem(projectId, pr.node_id);
+
+              const options = {
+                "Todo": "OPTION_ID_TODO",
+                "In progress": "OPTION_ID_IN_PROGRESS",
+                "In review": "OPTION_ID_IN_REVIEW",
+                "Done": "OPTION_ID_DONE"
+              };
+
+              const updateMutation = `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
                 updateProjectV2ItemFieldValue(
                   input: {
                     projectId: $projectId,
-                    itemId: $prId,
+                    itemId: $itemId,
                     fieldId: $fieldId,
                     value: { singleSelectOptionId: $optionId }
                   }
-                ) {
-                  projectV2Item { id }
-                }
-              }
-            `, {
-              projectId,
-              prId: pr.node_id,
-              fieldId: statusFieldId,
-              optionId: newStatus
-            });
+                ) { clientMutationId }
+              }`;
+
+              await github.graphql(updateMutation, {
+                projectId,
+                itemId: pr.node_id,
+                fieldId,
+                optionId: options[status]
+              });
+            }
+
+            run();
